@@ -1,18 +1,22 @@
 """
-Carga los resultados de PISA (ya calculados en R) a la tabla dataset_valores en Supabase.
+Carga los resultados de PISA (ya calculados en R) a dataset_valores en Supabase.
+REEMPLAZA los datos anteriores de PISA: borra, inserta y recalcula todo en una sola
+transacción. Si algo falla, no se cambia nada y el sitio conserva los datos que tenía.
 
-Uso:
+Uso (desde la raíz del proyecto):
     python pipeline/cargar_pisa.py
 
 Requiere:
-    - Archivo .env en la raíz del proyecto con DATABASE_URL
+    - .env con DATABASE_URL
     - CSV en data/raw/resultados_cruces_ocde.csv
 """
 
+import json
 import os
+
 import pandas as pd
-from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
+from sqlalchemy import create_engine, text
 
 load_dotenv()
 
@@ -20,15 +24,14 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 CSV_PATH = "data/raw/resultados_cruces_ocde.csv"
 NOMBRE_DATASET = "PISA"
 
-# Columnas del CSV que representan variables de corte.
-# Si en R agregas o quitas variables de corte, actualiza esta lista.
+# Columnas del CSV que son variables de corte.
+# Si agregas o quitas variables de corte en R, actualiza esta lista.
 COLUMNAS_CORTE = [
     "escs_q", "immig", "xescs_q", "aiusesch_q", "private",
     "boy", "d_hisced", "difflang", "repeat", "iscedl",
     "general", "schlocation", "no_ai_use",
 ]
 
-# Traduce el nombre de "Dominio" del CSV al nombre de eje que quieres guardar.
 MAPA_EJE = {
     "Ciencias": "ciencias",
     "Lectura": "lectura",
@@ -38,7 +41,6 @@ MAPA_EJE = {
 
 
 def construir_dimensiones(fila):
-    """Arma el JSON de dimensiones con el eje y los cortes activos de esta fila."""
     dims = {"eje": MAPA_EJE.get(fila["Dominio"], fila["Dominio"])}
     for col in COLUMNAS_CORTE:
         valor = fila[col]
@@ -55,17 +57,12 @@ def main():
     print(f"  {len(df)} filas leídas")
 
     with engine.begin() as conn:
-        # Obtener el id del dataset "PISA" (ya lo creaste como prueba en el Hito 3)
         dataset_id = conn.execute(
-            text("select id from datasets where nombre = :n"),
-            {"n": NOMBRE_DATASET},
+            text("select id from datasets where nombre = :n"), {"n": NOMBRE_DATASET}
         ).scalar()
         if dataset_id is None:
-            raise ValueError(
-                f"No existe un dataset llamado '{NOMBRE_DATASET}' en la tabla datasets."
-            )
+            raise ValueError(f"No existe un dataset llamado '{NOMBRE_DATASET}' en la tabla datasets.")
 
-        # Mapa código ISO3 -> id de país
         paises = conn.execute(text("select id, codigo_iso3 from paises")).fetchall()
         mapa_paises = {row.codigo_iso3: row.id for row in paises}
 
@@ -73,17 +70,15 @@ def main():
     registros = []
     paises_faltantes = set()
     for _, fila in df.iterrows():
-        iso3 = fila["cnt"]
-        pais_id = mapa_paises.get(iso3)
+        pais_id = mapa_paises.get(fila["cnt"])
         if pais_id is None:
-            paises_faltantes.add(iso3)
+            paises_faltantes.add(fila["cnt"])
             continue
-
         registros.append({
             "dataset_id": dataset_id,
             "pais_id": pais_id,
             "anio": int(fila["anio"]),
-            "dimensiones": construir_dimensiones(fila),
+            "dimensiones": json.dumps(construir_dimensiones(fila)),
             "valor": fila["Media"],
             "se": fila["SE"] if pd.notna(fila["SE"]) else None,
             "n": int(fila["N"]) if pd.notna(fila["N"]) else None,
@@ -91,19 +86,44 @@ def main():
         })
 
     if paises_faltantes:
-        print(f"  Aviso: {len(paises_faltantes)} códigos de país no encontrados en 'paises': {paises_faltantes}")
+        print(f"  AVISO: países del CSV que no existen en 'paises' (se omitieron): {sorted(paises_faltantes)}")
 
-    print(f"Insertando {len(registros)} filas en dataset_valores...")
     resultado = pd.DataFrame(registros)
 
-    # dimensiones necesita ir como JSON string para que Postgres lo acepte como jsonb
-    import json
-    resultado["dimensiones"] = resultado["dimensiones"].apply(json.dumps)
-
+    # Todo en una sola transacción: o se reemplaza todo, o no cambia nada.
     with engine.begin() as conn:
-        resultado.to_sql("dataset_valores", conn, if_exists="append", index=False,
-                          method="multi", chunksize=1000)
+        print("Borrando los datos anteriores de PISA...")
+        conn.execute(text("delete from dataset_valores where dataset_id = :d"), {"d": dataset_id})
 
+        print(f"Insertando {len(resultado)} filas...")
+        resultado.to_sql("dataset_valores", conn, if_exists="append", index=False,
+                         method="multi", chunksize=1000)
+
+        print("Calculando cortes_activos...")
+        conn.execute(text("""
+            update dataset_valores
+            set cortes_activos = coalesce(
+              (select string_agg(k, ',' order by k)
+               from jsonb_object_keys(dimensiones) as k where k <> 'eje'), '')
+            where dataset_id = :d
+        """), {"d": dataset_id})
+
+        print("Aplicando la regla de premium (gratis: sin cortes, género y escuela)...")
+        conn.execute(text("""
+            update dataset_valores
+            set es_premium = exists (
+              select 1 from jsonb_object_keys(dimensiones) as k
+              where k not in ('eje', 'boy', 'private'))
+            where dataset_id = :d
+        """), {"d": dataset_id})
+
+    with engine.connect() as conn:
+        filas = conn.execute(text(
+            "select anio, count(*) from dataset_valores where dataset_id = :d group by anio order by anio"
+        ), {"d": dataset_id}).fetchall()
+    print("Filas por año en la base de datos:")
+    for anio, n in filas:
+        print(f"  {anio}: {n}")
     print("Listo.")
 
 

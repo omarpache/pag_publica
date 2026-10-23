@@ -16,9 +16,6 @@ export default function MarcoPagina({
             Datos Abiertos Intl.
           </Link>
           <nav className="flex flex-wrap gap-x-5 gap-y-1 text-sm">
-            <Link href="/pisa" className="hover:underline">Datos</Link>
-            <Link href="/fuentes" className="hover:underline">Fuentes</Link>
-            <Link href="/metodologia" className="hover:underline">Metodología</Link>
             <Link href="/contacto" className="hover:underline">Contacto</Link>
           </nav>
         </div>
@@ -32,8 +29,10 @@ export default function MarcoPagina({
       <footer className="border-t border-[#1B2233]/15">
         <div className="max-w-3xl mx-auto px-6 py-8 text-sm text-[#1B2233]/60 space-y-2">
           <p>
-            Datos de PISA: OCDE. Cálculos y presentación independientes; este sitio no está
-            afiliado ni respaldado por la OCDE.
+            Los datos publicados en este sitio provienen de organismos y fuentes oficiales.
+            La fuente y la metodología de cada conjunto de datos se indican en su propia
+            página. Los cálculos y la presentación son independientes; este sitio no está
+            afiliado ni respaldado por las instituciones citadas.
           </p>
           <p>
             <a
